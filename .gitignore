@@ -1,0 +1,9 @@
+build/
+out/
+.vs/
+*.user
+CMakeUserPresets.json
+_deps/
+
+# Third-party OBS headers / import lib (libobs, GPL) — fetch locally, not vendored.
+deps/
