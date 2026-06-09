@@ -1,6 +1,6 @@
 # acevo-obs-plugin
 
-⚠️⚠️⚠️⚠️VibeCoded This for a friend i don't know ball about anything feel free to fork & make it better⚠️⚠️⚠️⚠️
+⚠️⚠️⚠️VibeCoded This for a friend i don't know ball about anything feel free to fork & make it better⚠️⚠️⚠️
 
 Capture multiple camera feeds from **a single instance of Assetto Corsa EVO** into
 **OBS Studio**.
