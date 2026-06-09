@@ -22,9 +22,9 @@ Currently available feeds:
 ## Architecture
 
 ```
-┌────────────────────────────┐         shared memory             ┌──────────────────┐
-│  AssettoCorsaEVO.exe (DX12) │   (Local\acevo_obs_ipc_v1)        │   OBS Studio     │
-│                            │  ───────────────────────────────▶ │                  │
+┌────────────────────────────┐         shared memory              ┌──────────────────┐
+│  AssettoCorsaEVO.exe (DX12)│   (Local\acevo_obs_ipc_v1)         │   OBS Studio     │
+│                            │  ───────────────────────────────▶  │                  │
 │  dxgi.dll (proxy + hooks)  │   KMT handles of shared D3D11      │  acevo-obs.dll   │
 │   • Present                │   textures (CleanView, Camera1)    │  (video source)  │
 │   • OMSetRenderTargets     │                                    │                  │
