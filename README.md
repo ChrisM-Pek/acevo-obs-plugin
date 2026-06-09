@@ -4,6 +4,9 @@
 
 My discord: porc_ypic
 
+PREVIEW:
+https://i.imgur.com/jSleRGM.mp4
+
 Capture multiple camera feeds from **a single instance of Assetto Corsa EVO** into
 **OBS Studio**.
 
