@@ -157,17 +157,6 @@ Just delete `dxgi.dll` and `dxgi_orig.dll` from the game folder.
 
 ---
 
-## Roadmap
-
-- [x] Main view without HUD
-- [x] Load at startup via `dxgi.dll` proxy
-- [x] Camera selector in the OBS plugin
-- [ ] Reliable mirror capture (in-game validation)
-- [ ] Two simultaneous OBS sources tested
-- [ ] Full-screen free camera (override `renderPassData`)
-
----
-
 ## Warnings
 
 - **Personal / offline use.** A proxy `dxgi.dll` injects code into the game process.
