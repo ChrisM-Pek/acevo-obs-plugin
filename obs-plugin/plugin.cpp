@@ -54,7 +54,9 @@ obs_properties_t* SourceProperties(void*) {
         props, "camera", "Camera",
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
     obs_property_list_add_int(list, "Main view (no HUD)", (long long)SourceId::CleanView);
-    obs_property_list_add_int(list, "Rear-view mirror", (long long)SourceId::Camera1);
+    obs_property_list_add_int(list, "Mirror - center", (long long)SourceId::MirrorCenter);
+    obs_property_list_add_int(list, "Mirror - left", (long long)SourceId::MirrorLeft);
+    obs_property_list_add_int(list, "Mirror - right", (long long)SourceId::MirrorRight);
     return props;
 }
 

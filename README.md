@@ -14,13 +14,18 @@ The project injects a DLL into the game (DirectX 12 engine), intercepts renderin
 copies selected render targets into shared textures, and an OBS plugin displays them
 as independent video sources.
 
-Currently available feeds:
+Currently available feeds (4 independent OBS sources):
 
-- **Main view (no HUD)** — the tonemapped scene captured right before the HUD composite.
-- **Rear-view mirror** — the mirror render target (`mirror_texture0`, `1024x256`,
-  HDR `R11G11B10_FLOAT`), tonemapped to RGBA8 inside the DLL. The engine fills this
-  texture across Colour Pass #7 (base) and #8 (extra detail/LOD); we capture the final
-  version after the last render-target write.
+| OBS source | Game texture | Resolution | Notes |
+| --- | --- | --- | --- |
+| **Main view (no HUD)** | swapchain backbuffer | native (e.g. 3440×1440) | Tonemapped scene, captured before HUD composite |
+| **Mirror — center** | `mirror_texture0` | 1024×256 | Rear-view mirror; Colour Pass #7 + #8 (LOD) |
+| **Mirror — left** | `mirror_texture1` | 512×256 | Left side mirror |
+| **Mirror — right** | `mirror_texture2` | 512×256 | Right side mirror |
+
+Mirror textures are HDR (`R11G11B10_FLOAT`); the DLL tonemaps them to RGBA8 for OBS.
+Each mirror is copied when its render target leaves `RENDER_TARGET` state (last write
+of the frame wins).
 
 > ⚠️ Personal modding / reverse-engineering project. See [Warnings](#warnings).
 
@@ -33,7 +38,7 @@ Currently available feeds:
 │  AssettoCorsaEVO.exe (DX12)│   (Local\acevo_obs_ipc_v1)         │   OBS Studio     │
 │                            │  ───────────────────────────────▶  │                  │
 │  dxgi.dll (proxy + hooks)  │   KMT handles of shared D3D11      │  acevo-obs.dll   │
-│   • Present                │   textures (CleanView, Camera1)    │  (video source)  │
+│   • Present                │   textures (4 sources)             │  (video source)  │
 │   • OMSetRenderTargets     │                                    │                  │
 │   • CreateRenderTargetView │                                    │  ┌────────────┐  │
 │   • ExecuteCommandLists    │                                    │  │Camera menu │  │
@@ -142,8 +147,13 @@ Copy-Item -Force 'build\obs-plugin\Release\acevo-obs.dll' `
 2. Launch **the game** normally (the proxy loads automatically; a log console opens).
 3. Enter a session.
 4. In OBS: *Sources → Add → "Assetto Corsa EVO (camera)"*.
-5. In the source properties, pick **Main view (no HUD)** or **Rear-view mirror**.
-   For two feeds: create two sources, one per camera.
+5. In the source properties, pick a feed from the **Camera** dropdown:
+   - **Main view (no HUD)**
+   - **Mirror — center**
+   - **Mirror — left**
+   - **Mirror — right**
+
+   Create one OBS source per feed (e.g. 4 sources for the full setup).
 
 ### Uninstall / revert to vanilla
 
@@ -156,13 +166,29 @@ Just delete `dxgi.dll` and `dxgi_orig.dll` from the game folder.
 - **Swapchain detection** — the backbuffer RTV handle is *learned* at `Present` time
   (the last bound RTV); the swapchain → other-RT switch then triggers the copy of the
   clean scene (post-tonemap, pre-HUD).
-- **Mirror detection** — `IsMirrorDesc` heuristic targeting `mirror_texture0` (2D
-  `R11G11B10_FLOAT`, `ALLOW_RENDER_TARGET`, wide ~4:1 like `1024x256`). The copy is recorded
-  each time the mirror leaves the render-target state, so the last write of the frame
-  (Colour Pass #8) is the one captured. Adjust if the game changes format/dimensions.
-- **Mirror tonemap** — the mirror RT is linear HDR; a tiny D3D11 shader (`c/(c+1)` + gamma 2.2)
-  converts it to RGBA8 for correct rendering in OBS.
-- **IPC protocol** — `kProtocolVersion` in `shared/ipc.h`. Bump it whenever the layout changes.
+- **Mirror detection** — `IsMirrorDesc` matches 2D `R11G11B10_FLOAT` render targets
+  (wide aspect, height ≤ 512). Three slots are assigned automatically:
+  - **Slot 0 (center)** — width ≥ 768 px (`mirror_texture0`, 1024×256)
+  - **Slot 1 (left)** — first 512×256 mirror seen (`mirror_texture1`)
+  - **Slot 2 (right)** — second 512×256 mirror seen (`mirror_texture2`)
+
+  Side mirrors share the same dimensions, so left/right are distinguished by order of
+  first appearance in the frame. If swapped in OBS, just pick the other source.
+- **Mirror tonemap** — mirror RTs are linear HDR; a tiny D3D11 shader (`c/(c+1)` + gamma 2.2)
+  converts each to RGBA8 for correct rendering in OBS.
+- **IPC protocol** — `kProtocolVersion = 3` in `shared/ipc.h` (`CleanView`, `MirrorCenter`,
+  `MirrorLeft`, `MirrorRight`). Bump it whenever the layout changes.
+
+---
+
+## Status
+
+- [x] Main view without HUD
+- [x] Load at startup via `dxgi.dll` proxy
+- [x] Center rear-view mirror
+- [x] Left + right side mirrors (3 mirror sources)
+- [x] Camera selector in the OBS plugin
+- [ ] Full-screen free camera (override `renderPassData`)
 
 ---
 

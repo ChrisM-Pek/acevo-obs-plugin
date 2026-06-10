@@ -1,13 +1,17 @@
 // DLL loaded into AssettoCorsaEVO.exe (D3D12), typically as a dxgi.dll proxy.
 //
-// Two captures to OBS:
-//   - CleanView (source 1): main tonemapped scene WITHOUT HUD. We copy the
+// Captures to OBS:
+//   - CleanView (source 0): main tonemapped scene WITHOUT HUD. We copy the
 //     swapchain right after tonemap, before the HUD composite.
-//   - Camera1  (source 2): rear-view mirror (mirror_texture0, 1024x256,
-//     R11G11B10_FLOAT HDR, filled by Colour Pass #7 then #8). We copy its RT
-//     each time it leaves RENDER_TARGET state (the last copy of the frame,
-//     after pass #8, wins), then tonemap to RGBA8 via a small D3D11 pass
-//     (otherwise the image would be too dark).
+//   - Mirrors (sources 1..3): the rear-view mirrors (mirror_textureN,
+//     R11G11B10_FLOAT HDR). The center mirror is ~1024x256, the side mirrors
+//     are 512x256. We copy each mirror RT when it leaves RENDER_TARGET state
+//     (the last write of the frame wins), then tonemap to RGBA8 via a small
+//     D3D11 pass (otherwise the image would be too dark).
+//
+// Side mirrors (left/right) share the same dimensions, so we assign them by
+// order of first appearance in the frame: first 512-wide -> left, second ->
+// right. If reversed in practice, just swap the two OBS sources.
 //
 // RT detection via OMSetRenderTargets + descriptor->resource map
 // (CreateRenderTargetView). For the swapchain we learn the handle at Present.
@@ -84,17 +88,24 @@ std::atomic<SIZE_T>   g_lastRtHandle{0};
 ID3D12Resource*  g_captureD3D12 = nullptr;
 ID3D11Texture2D* g_sharedTex = nullptr;
 
-// Camera1 (mirror)
-ID3D12Resource*  g_mirrorCapture = nullptr;     // HDR R11G11B10 copy
-ID3D11Texture2D* g_mirrorShared = nullptr;      // tonemapped RGBA8 (for OBS)
-ID3D11RenderTargetView* g_mirrorRTV = nullptr;
+// Shared tonemap pipeline (used by every mirror).
 ID3D11VertexShader* g_vs = nullptr;
 ID3D11PixelShader*  g_ps = nullptr;
 ID3D11SamplerState* g_samp = nullptr;
-std::atomic<ID3D12Resource*> g_mirrorRes{nullptr};
-D3D12_RESOURCE_DESC g_mirrorDesc{};
-bool g_mirrorReady = false;
-std::atomic<bool> g_mirrorCopied{false};
+
+// Mirror slots: 0 = center, 1 = left, 2 = right. Each maps to a SourceId.
+constexpr int kMirrorCount = 3;
+struct MirrorSlot {
+    std::atomic<ID3D12Resource*> res{nullptr};  // game RT being captured
+    D3D12_RESOURCE_DESC desc{};
+    ID3D12Resource*  capture = nullptr;         // our HDR copy (D3D12)
+    ID3D11Texture2D* shared = nullptr;          // tonemapped RGBA8 (for OBS)
+    ID3D11RenderTargetView* rtv = nullptr;
+    bool ready = false;
+    std::atomic<bool> copied{false};
+    SourceId sourceId = SourceId::MirrorCenter;
+};
+MirrorSlot g_mirrors[kMirrorCount];
 
 HANDLE       g_mapping = nullptr;
 SharedBlock* g_shared = nullptr;
@@ -105,7 +116,7 @@ std::unordered_set<ID3D12Resource*>         g_swapBuffers;
 std::unordered_set<ID3D12Resource*>         g_loggedRT;
 std::unordered_set<SIZE_T>                  g_loggedHandles;
 std::vector<ID3D12Resource*>                g_backbuffers;
-struct CmdPrev { bool swap; bool mirror; };
+struct CmdPrev { bool swap; int mirror; };  // mirror = slot index, or -1
 std::unordered_map<ID3D12GraphicsCommandList*, CmdPrev> g_prev;
 
 void OpenConsole() {
@@ -228,28 +239,29 @@ bool LazyInit(IDXGISwapChain* swap) {
 }
 
 void CreateMirrorTargets() {
-    if (g_mirrorReady) return;
-    ID3D12Resource* mr = g_mirrorRes.load();
-    if (!mr) return;
+    for (int i = 0; i < kMirrorCount; ++i) {
+        MirrorSlot& m = g_mirrors[i];
+        if (m.ready || !m.res.load()) continue;
 
-    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-    if (FAILED(g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &g_mirrorDesc,
-            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&g_mirrorCapture)))) return;
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        if (FAILED(g_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &m.desc,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m.capture)))) continue;
 
-    HANDLE shared = nullptr;
-    g_mirrorShared = CreateSharedRGBA((UINT)g_mirrorDesc.Width, g_mirrorDesc.Height,
-                                      DXGI_FORMAT_R8G8B8A8_UNORM, &shared);
-    if (!g_mirrorShared || !shared) return;
-    g_d11device->CreateRenderTargetView(g_mirrorShared, nullptr, &g_mirrorRTV);
+        HANDLE shared = nullptr;
+        m.shared = CreateSharedRGBA((UINT)m.desc.Width, m.desc.Height,
+                                    DXGI_FORMAT_R8G8B8A8_UNORM, &shared);
+        if (!m.shared || !shared) continue;
+        g_d11device->CreateRenderTargetView(m.shared, nullptr, &m.rtv);
 
-    auto& src = g_shared->sources[(uint32_t)SourceId::Camera1];
-    src.width = (UINT)g_mirrorDesc.Width; src.height = g_mirrorDesc.Height;
-    src.dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-    src.kmtHandle = (uint64_t)(uintptr_t)shared; src.valid = 1;
+        auto& src = g_shared->sources[(uint32_t)m.sourceId];
+        src.width = (UINT)m.desc.Width; src.height = m.desc.Height;
+        src.dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        src.kmtHandle = (uint64_t)(uintptr_t)shared; src.valid = 1;
 
-    printf("[acevo-obs] Camera1 (mirror) ready %llux%u\n",
-           (unsigned long long)g_mirrorDesc.Width, g_mirrorDesc.Height);
-    g_mirrorReady = true;
+        printf("[acevo-obs] Mirror slot %d (source %u) ready %llux%u\n",
+               i, (uint32_t)m.sourceId, (unsigned long long)m.desc.Width, m.desc.Height);
+        m.ready = true;
+    }
 }
 
 void PublishCleanView() {
@@ -265,19 +277,19 @@ void PublishCleanView() {
     }
 }
 
-void PublishMirror() {
-    if (!g_mirrorReady || !g_mirrorCopied.load()) return;
+void PublishMirrorSlot(MirrorSlot& m) {
+    if (!m.ready || !m.copied.load()) return;
     D3D11_RESOURCE_FLAGS rf{}; rf.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     ID3D11Resource* w = nullptr;
-    if (FAILED(g_11on12->CreateWrappedResource(g_mirrorCapture, &rf,
+    if (FAILED(g_11on12->CreateWrappedResource(m.capture, &rf,
             D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON, IID_PPV_ARGS(&w)))) return;
     g_11on12->AcquireWrappedResources(&w, 1);
 
     ID3D11ShaderResourceView* srv = nullptr;
     g_d11device->CreateShaderResourceView(w, nullptr, &srv);
 
-    D3D11_VIEWPORT vp{}; vp.Width = (float)g_mirrorDesc.Width; vp.Height = (float)g_mirrorDesc.Height; vp.MaxDepth = 1;
-    g_d11ctx->OMSetRenderTargets(1, &g_mirrorRTV, nullptr);
+    D3D11_VIEWPORT vp{}; vp.Width = (float)m.desc.Width; vp.Height = (float)m.desc.Height; vp.MaxDepth = 1;
+    g_d11ctx->OMSetRenderTargets(1, &m.rtv, nullptr);
     g_d11ctx->RSSetViewports(1, &vp);
     g_d11ctx->VSSetShader(g_vs, nullptr, 0);
     g_d11ctx->PSSetShader(g_ps, nullptr, 0);
@@ -291,14 +303,44 @@ void PublishMirror() {
     if (srv) srv->Release();
     g_11on12->ReleaseWrappedResources(&w, 1);
     g_d11ctx->Flush(); w->Release();
-    g_shared->sources[(uint32_t)SourceId::Camera1].frameIndex = ++g_frame;
+    g_shared->sources[(uint32_t)m.sourceId].frameIndex = ++g_frame;
+}
+
+void PublishMirrors() {
+    for (int i = 0; i < kMirrorCount; ++i) PublishMirrorSlot(g_mirrors[i]);
 }
 
 bool IsMirrorDesc(const D3D12_RESOURCE_DESC& d) {
     return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
            d.Format == DXGI_FORMAT_R11G11B10_FLOAT &&
            (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) &&
-           d.Width >= 3 * d.Height && d.Width <= 2048;
+           d.Width >= 2 * d.Height && d.Width <= 2048 && d.Height <= 512;
+}
+
+// Returns the slot index for a resource already assigned, else -1.
+int FindMirrorSlot(ID3D12Resource* res) {
+    for (int i = 0; i < kMirrorCount; ++i)
+        if (g_mirrors[i].res.load() == res) return i;
+    return -1;
+}
+
+// Classify a freshly-seen mirror RT into a slot. Center = wide (>=768 px),
+// side mirrors fill left then right in discovery order. Returns slot or -1.
+int AssignMirrorSlot(ID3D12Resource* res, const D3D12_RESOURCE_DESC& d) {
+    int target = -1;
+    if (d.Width >= 768) {
+        target = 0;  // center
+    } else {
+        if (!g_mirrors[1].res.load()) target = 1;        // left
+        else if (!g_mirrors[2].res.load()) target = 2;   // right
+    }
+    if (target < 0 || g_mirrors[target].res.load()) return -1;
+    g_mirrors[target].desc = d;
+    res->AddRef();
+    g_mirrors[target].res = res;
+    printf("[acevo-obs] Mirror RT detected -> slot %d (%llux%u)\n",
+           target, (unsigned long long)d.Width, d.Height);
+    return target;
 }
 
 // ---- Hooks ----
@@ -313,7 +355,7 @@ void STDMETHODCALLTYPE HookedOMSetRT(ID3D12GraphicsCommandList* cl, UINT num,
                                      const D3D12_CPU_DESCRIPTOR_HANDLE* rts, BOOL single,
                                      const D3D12_CPU_DESCRIPTOR_HANDLE* ds) {
     if (g_initOk) {
-        bool curSwap = false, curMirror = false;
+        bool curSwap = false;
         ID3D12Resource* boundRes = nullptr;
         if (num > 0 && rts) {
             g_lastRtHandle = rts[0].ptr;
@@ -340,15 +382,15 @@ void STDMETHODCALLTYPE HookedOMSetRT(ID3D12GraphicsCommandList* cl, UINT num,
                 }
             }
         }
-        // Mirror detection (outside main lock for GetDesc).
-        if (boundRes && !curSwap && !g_mirrorRes.load()) {
-            D3D12_RESOURCE_DESC d = boundRes->GetDesc();
-            if (IsMirrorDesc(d)) {
-                g_mirrorDesc = d; boundRes->AddRef(); g_mirrorRes = boundRes;
-                puts("[acevo-obs] Mirror RT detected.");
+        // Mirror detection/classification (outside main lock for GetDesc).
+        int curMirrorSlot = -1;
+        if (boundRes && !curSwap) {
+            curMirrorSlot = FindMirrorSlot(boundRes);
+            if (curMirrorSlot < 0) {
+                D3D12_RESOURCE_DESC d = boundRes->GetDesc();
+                if (IsMirrorDesc(d)) curMirrorSlot = AssignMirrorSlot(boundRes, d);
             }
         }
-        if (boundRes && boundRes == g_mirrorRes.load()) curMirror = true;
 
         std::lock_guard<std::mutex> lk(g_mtx);
         CmdPrev& p = g_prev[cl];
@@ -357,11 +399,15 @@ void STDMETHODCALLTYPE HookedOMSetRT(ID3D12GraphicsCommandList* cl, UINT num,
             if (idx < g_backbuffers.size() && g_backbuffers[idx])
                 RecordCopy(cl, g_backbuffers[idx], g_captureD3D12);
         }
-        if (p.mirror && !curMirror && g_mirrorReady && g_mirrorRes.load()) {
-            RecordCopy(cl, g_mirrorRes.load(), g_mirrorCapture);
-            g_mirrorCopied = true;
+        // When we leave a mirror RT, copy that slot's last frame content.
+        if (p.mirror >= 0 && curMirrorSlot != p.mirror) {
+            MirrorSlot& m = g_mirrors[p.mirror];
+            if (m.ready && m.res.load()) {
+                RecordCopy(cl, m.res.load(), m.capture);
+                m.copied = true;
+            }
         }
-        p.swap = curSwap; p.mirror = curMirror;
+        p.swap = curSwap; p.mirror = curMirrorSlot;
     }
     g_origOMSetRT(cl, num, rts, single, ds);
 }
@@ -381,9 +427,9 @@ HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* swap, UINT sync, UINT fl
             UINT idx = g_swap3 ? g_swap3->GetCurrentBackBufferIndex() : 0;
             if (idx < g_backbuffers.size() && g_backbuffers[idx]) g_rtvMap[h] = g_backbuffers[idx];
         }
-        if (g_mirrorRes.load() && !g_mirrorReady) CreateMirrorTargets();
+        CreateMirrorTargets();
         PublishCleanView();
-        PublishMirror();
+        PublishMirrors();
     }
     return g_origPresent(swap, sync, flags);
 }
@@ -435,6 +481,9 @@ bool ResolveVtables(void** present, void** execute, void** omSetRT, void** creat
 
 DWORD WINAPI InitThread(LPVOID) {
     OpenConsole();
+    g_mirrors[0].sourceId = SourceId::MirrorCenter;
+    g_mirrors[1].sourceId = SourceId::MirrorLeft;
+    g_mirrors[2].sourceId = SourceId::MirrorRight;
     if (!InitIpc()) { puts("[acevo-obs] InitIpc failed."); return 1; }
     if (MH_Initialize() != MH_OK) { puts("[acevo-obs] MH_Initialize failed."); return 1; }
     void *present=nullptr,*execute=nullptr,*omSetRT=nullptr,*createRTV=nullptr;

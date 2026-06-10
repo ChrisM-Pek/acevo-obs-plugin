@@ -12,12 +12,13 @@
 namespace acevo_obs {
 
 inline constexpr wchar_t kSharedMemoryName[] = L"Local\\acevo_obs_ipc_v1";
-inline constexpr uint32_t kProtocolVersion = 2;
+inline constexpr uint32_t kProtocolVersion = 3;
 
 enum class SourceId : uint32_t {
-    CleanView = 0,  // main view without HUD
-    Camera1   = 1,  // rear-view mirror
-    Camera2   = 2,  // reserved for future cameras
+    CleanView    = 0,  // main view without HUD
+    MirrorCenter = 1,  // rear-view mirror (mirror_texture0, ~1024x256)
+    MirrorLeft   = 2,  // left mirror  (512x256, first 512-wide seen)
+    MirrorRight  = 3,  // right mirror (512x256, second 512-wide seen)
     Count
 };
 
