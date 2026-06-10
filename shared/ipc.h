@@ -1,13 +1,13 @@
 #pragma once
 #include <cstdint>
 
-// Protocole IPC partagé entre la DLL injectée (côté jeu, D3D12) et le plugin
-// OBS (D3D11).
+// Shared IPC protocol between the injected DLL (game side, D3D12) and the OBS
+// plugin (D3D11).
 //
-// La DLL utilise D3D11On12 pour copier le backbuffer D3D12 du jeu dans une
-// texture D3D11 *partagée* (handle KMT legacy obtenu via
-// IDXGIResource::GetSharedHandle). Ce handle KMT est lisible par OBS avec
-// gs_texture_open_shared(). La DLL publie le handle + les dimensions ici.
+// The DLL uses D3D11On12 to copy the game's D3D12 backbuffer into a *shared*
+// D3D11 texture (legacy KMT handle via IDXGIResource::GetSharedHandle). OBS
+// opens it with gs_texture_open_shared(). The DLL publishes the handle and
+// dimensions here.
 
 namespace acevo_obs {
 
@@ -15,9 +15,9 @@ inline constexpr wchar_t kSharedMemoryName[] = L"Local\\acevo_obs_ipc_v1";
 inline constexpr uint32_t kProtocolVersion = 2;
 
 enum class SourceId : uint32_t {
-    CleanView = 0,  // backbuffer final (PoC palier 2)
-    Camera1   = 1,  // caméra alternative (palier 3, plus tard)
-    Camera2   = 2,
+    CleanView = 0,  // main view without HUD
+    Camera1   = 1,  // rear-view mirror
+    Camera2   = 2,  // reserved for future cameras
     Count
 };
 
@@ -25,10 +25,10 @@ enum class SourceId : uint32_t {
 struct SharedTextureDesc {
     uint32_t width;
     uint32_t height;
-    uint32_t dxgiFormat;     // DXGI_FORMAT du backbuffer
-    uint32_t valid;          // 0 = pas prêt, 1 = handle exploitable
-    uint64_t kmtHandle;      // handle KMT (GetSharedHandle), ouvrable par OBS
-    uint64_t frameIndex;     // incrémenté à chaque Present
+    uint32_t dxgiFormat;     // DXGI_FORMAT of the shared texture
+    uint32_t valid;          // 0 = not ready, 1 = handle is usable
+    uint64_t kmtHandle;      // KMT handle (GetSharedHandle), openable by OBS
+    uint64_t frameIndex;     // incremented on each Present
 };
 
 struct SharedBlock {

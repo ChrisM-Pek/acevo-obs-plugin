@@ -1,5 +1,5 @@
-// Plugin OBS Studio : affiche la texture partagee publiee par la DLL injectee
-// dans le jeu (palier 2 : vue du backbuffer).
+// OBS Studio plugin: displays the shared texture published by the injected DLL
+// in the game (main view and mirror feeds).
 
 #include <obs-module.h>
 #include <graphics/graphics.h>
@@ -32,7 +32,7 @@ void SourceUpdate(void* data, obs_data_t* settings) {
     uint32_t newId = (uint32_t)obs_data_get_int(settings, "camera");
     if (newId != s->sourceId) {
         s->sourceId = newId;
-        s->openedHandle = 0;  // force la reouverture de la texture
+        s->openedHandle = 0;  // force texture reopen
     }
 }
 
@@ -53,8 +53,8 @@ obs_properties_t* SourceProperties(void*) {
     obs_property_t* list = obs_properties_add_list(
         props, "camera", "Camera",
         OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(list, "Vue principale (sans HUD)", (long long)SourceId::CleanView);
-    obs_property_list_add_int(list, "Retroviseur", (long long)SourceId::Camera1);
+    obs_property_list_add_int(list, "Main view (no HUD)", (long long)SourceId::CleanView);
+    obs_property_list_add_int(list, "Rear-view mirror", (long long)SourceId::Camera1);
     return props;
 }
 
@@ -72,10 +72,10 @@ void SourceDestroy(void* data) {
     delete s;
 }
 
-// (Re)ouvre la texture partagee si le handle a change.
+// (Re)open the shared texture if the handle changed.
 void EnsureTexture(AcevoSource* s) {
-    // Si la memoire partagee n'existait pas encore a la creation de la source
-    // (DLL pas encore injectee), on reessaie ici a chaque frame.
+    // If shared memory did not exist when the source was created (DLL not loaded
+    // yet), retry here every frame.
     if (!s->shared) {
         if (!s->mapping)
             s->mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, kSharedMemoryName);
@@ -97,7 +97,7 @@ void EnsureTexture(AcevoSource* s) {
         s->openedHandle = src.kmtHandle;
         s->width = src.width;
         s->height = src.height;
-        blog(LOG_INFO, "[acevo-obs] texture partagee ouverte %ux%u",
+        blog(LOG_INFO, "[acevo-obs] shared texture opened %ux%u",
              s->width, s->height);
     }
 }
@@ -142,6 +142,6 @@ obs_source_info MakeInfo() {
 bool obs_module_load(void) {
     static obs_source_info info = MakeInfo();
     obs_register_source(&info);
-    blog(LOG_INFO, "[acevo-obs] plugin charge");
+    blog(LOG_INFO, "[acevo-obs] plugin loaded");
     return true;
 }

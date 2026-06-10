@@ -1,18 +1,17 @@
-// DLL injectée dans AssettoCorsaEVO.exe (D3D12).
+// DLL loaded into AssettoCorsaEVO.exe (D3D12), typically as a dxgi.dll proxy.
 //
-// Deux captures vers OBS :
-//   - CleanView (source 1) : la scene principale tonemappee SANS HUD. On copie
-//     le swapchain juste apres le tonemap, avant le composite du HUD.
-//   - Camera1  (source 2) : le retroviseur (mirror_texture0, 1024x256,
-//     R11G11B10_FLOAT HDR, rempli par les Colour Pass #7 puis #8). On copie sa
-//     RT a chaque sortie d'etat RENDER_TARGET (la derniere copie de la frame,
-//     apres le pass #8, gagne), puis on tonemappe en RGBA8 via une petite passe
-//     D3D11 (sinon l'image serait sombre).
+// Two captures to OBS:
+//   - CleanView (source 1): main tonemapped scene WITHOUT HUD. We copy the
+//     swapchain right after tonemap, before the HUD composite.
+//   - Camera1  (source 2): rear-view mirror (mirror_texture0, 1024x256,
+//     R11G11B10_FLOAT HDR, filled by Colour Pass #7 then #8). We copy its RT
+//     each time it leaves RENDER_TARGET state (the last copy of the frame,
+//     after pass #8, wins), then tonemap to RGBA8 via a small D3D11 pass
+//     (otherwise the image would be too dark).
 //
-// Detection des RT via OMSetRenderTargets + map descripteur->ressource
-// (CreateRenderTargetView). Pour le swapchain on apprend le handle a Present.
-// Pour le miroir, injecter depuis le MENU (avant chargement session) pour que
-// la creation de sa RTV soit captee.
+// RT detection via OMSetRenderTargets + descriptor->resource map
+// (CreateRenderTargetView). For the swapchain we learn the handle at Present.
+// With the dxgi proxy loaded at startup, all RTVs are captured from boot.
 
 #include <windows.h>
 #include <dxgi1_4.h>
@@ -30,8 +29,8 @@
 #include "MinHook.h"
 #include "../shared/ipc.h"
 
-// Proxy dxgi : on transfere tous les exports vers dxgi_orig.dll (copie du vrai
-// dxgi systeme placee a cote du jeu). Permet de charger notre DLL au demarrage.
+// dxgi proxy: forward all exports to dxgi_orig.dll (copy of the real system
+// dxgi placed next to the game). Lets our DLL load at process startup.
 #pragma comment(linker, "/EXPORT:ApplyCompatResolutionQuirking=dxgi_orig.ApplyCompatResolutionQuirking,@1")
 #pragma comment(linker, "/EXPORT:CompatString=dxgi_orig.CompatString,@2")
 #pragma comment(linker, "/EXPORT:CompatValue=dxgi_orig.CompatValue,@3")
@@ -85,9 +84,9 @@ std::atomic<SIZE_T>   g_lastRtHandle{0};
 ID3D12Resource*  g_captureD3D12 = nullptr;
 ID3D11Texture2D* g_sharedTex = nullptr;
 
-// Camera1 (miroir)
-ID3D12Resource*  g_mirrorCapture = nullptr;     // copie HDR R11G11B10
-ID3D11Texture2D* g_mirrorShared = nullptr;      // RGBA8 tonemappee (pour OBS)
+// Camera1 (mirror)
+ID3D12Resource*  g_mirrorCapture = nullptr;     // HDR R11G11B10 copy
+ID3D11Texture2D* g_mirrorShared = nullptr;      // tonemapped RGBA8 (for OBS)
 ID3D11RenderTargetView* g_mirrorRTV = nullptr;
 ID3D11VertexShader* g_vs = nullptr;
 ID3D11PixelShader*  g_ps = nullptr;
@@ -112,7 +111,7 @@ std::unordered_map<ID3D12GraphicsCommandList*, CmdPrev> g_prev;
 void OpenConsole() {
     AllocConsole();
     FILE* f = nullptr; freopen_s(&f, "CONOUT$", "w", stdout);
-    puts("[acevo-obs] DLL attachee.");
+    puts("[acevo-obs] DLL attached.");
 }
 
 bool InitIpc() {
@@ -138,7 +137,7 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES from,
     return b;
 }
 
-// Copie src (en RENDER_TARGET) -> dst (en COMMON) dans le command list du jeu.
+// Copy src (RENDER_TARGET) -> dst (COMMON) into the game's command list.
 void RecordCopy(ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12Resource* dst) {
     D3D12_RESOURCE_BARRIER b[2];
     b[0] = Transition(src, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -222,7 +221,7 @@ bool LazyInit(IDXGISwapChain* swap) {
     src.kmtHandle = (uint64_t)(uintptr_t)shared; src.valid = 1;
 
     InitTonemap();
-    printf("[acevo-obs] CleanView prete %llux%u fmt=%d\n",
+    printf("[acevo-obs] CleanView ready %llux%u fmt=%d\n",
            (unsigned long long)rd.Width, rd.Height, rd.Format);
     g_initOk = true;
     return true;
@@ -248,7 +247,7 @@ void CreateMirrorTargets() {
     src.dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     src.kmtHandle = (uint64_t)(uintptr_t)shared; src.valid = 1;
 
-    printf("[acevo-obs] Camera1 (retroviseur) prete %llux%u\n",
+    printf("[acevo-obs] Camera1 (mirror) ready %llux%u\n",
            (unsigned long long)g_mirrorDesc.Width, g_mirrorDesc.Height);
     g_mirrorReady = true;
 }
@@ -325,7 +324,7 @@ void STDMETHODCALLTYPE HookedOMSetRT(ID3D12GraphicsCommandList* cl, UINT num,
                 if (g_swapBuffers.count(boundRes)) curSwap = true;
             }
         }
-        // Diagnostic : logge chaque handle RTV bind (resolu ou non), une fois.
+        // Diagnostic: log each bound RTV handle (resolved or not), once.
         if (num > 0 && rts) {
             bool firstTime;
             { std::lock_guard<std::mutex> lk(g_mtx);
@@ -333,20 +332,20 @@ void STDMETHODCALLTYPE HookedOMSetRT(ID3D12GraphicsCommandList* cl, UINT num,
             if (firstTime) {
                 if (boundRes) {
                     D3D12_RESOURCE_DESC d = boundRes->GetDesc();
-                    printf("[acevo-obs][RT] handle=%p RESOLU %llux%u fmt=%d flags=0x%x\n",
+                    printf("[acevo-obs][RT] handle=%p RESOLVED %llux%u fmt=%d flags=0x%x\n",
                            (void*)rts[0].ptr, (unsigned long long)d.Width, d.Height, d.Format, d.Flags);
                 } else {
-                    printf("[acevo-obs][RT] handle=%p NON-RESOLU (RTV creee avant injection)\n",
+                    printf("[acevo-obs][RT] handle=%p UNRESOLVED (RTV created before injection)\n",
                            (void*)rts[0].ptr);
                 }
             }
         }
-        // Detection du miroir (hors lock principal pour GetDesc).
+        // Mirror detection (outside main lock for GetDesc).
         if (boundRes && !curSwap && !g_mirrorRes.load()) {
             D3D12_RESOURCE_DESC d = boundRes->GetDesc();
             if (IsMirrorDesc(d)) {
                 g_mirrorDesc = d; boundRes->AddRef(); g_mirrorRes = boundRes;
-                puts("[acevo-obs] RT retroviseur detectee.");
+                puts("[acevo-obs] Mirror RT detected.");
             }
         }
         if (boundRes && boundRes == g_mirrorRes.load()) curMirror = true;
@@ -369,7 +368,7 @@ void STDMETHODCALLTYPE HookedOMSetRT(ID3D12GraphicsCommandList* cl, UINT num,
 
 void STDMETHODCALLTYPE HookedExecute(ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* lists) {
     if (!g_queue && q->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
-        g_queue = q; puts("[acevo-obs] Command queue DIRECT capturee.");
+        g_queue = q; puts("[acevo-obs] DIRECT command queue captured.");
     }
     g_origExecute(q, n, lists);
 }
@@ -405,8 +404,8 @@ bool ResolveVtables(void** present, void** execute, void** omSetRT, void** creat
     wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"acevo_dummy";
     RegisterClassExW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"", WS_OVERLAPPEDWINDOW, 0,0,16,16,nullptr,nullptr,wc.hInstance,nullptr);
-    // On charge le vrai dxgi (copie dxgi_orig.dll) pour creer la factory sans
-    // dependre de notre propre table d'import (notre DLL s'appelle dxgi.dll).
+    // Load the real dxgi (dxgi_orig.dll copy) to create the factory without
+    // depending on our own import table (our DLL is named dxgi.dll).
     using CreateFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
     CreateFactory1Fn realCreateFactory1 = nullptr;
     HMODULE realDxgi = LoadLibraryW(L"dxgi_orig.dll");
@@ -436,18 +435,18 @@ bool ResolveVtables(void** present, void** execute, void** omSetRT, void** creat
 
 DWORD WINAPI InitThread(LPVOID) {
     OpenConsole();
-    if (!InitIpc()) { puts("[acevo-obs] InitIpc echoue."); return 1; }
-    if (MH_Initialize() != MH_OK) { puts("[acevo-obs] MH_Initialize echoue."); return 1; }
+    if (!InitIpc()) { puts("[acevo-obs] InitIpc failed."); return 1; }
+    if (MH_Initialize() != MH_OK) { puts("[acevo-obs] MH_Initialize failed."); return 1; }
     void *present=nullptr,*execute=nullptr,*omSetRT=nullptr,*createRTV=nullptr;
     if (!ResolveVtables(&present,&execute,&omSetRT,&createRTV)) {
-        puts("[acevo-obs] ResolveVtables echoue."); return 1;
+        puts("[acevo-obs] ResolveVtables failed."); return 1;
     }
     MH_CreateHook(execute,   &HookedExecute,   reinterpret_cast<void**>(&g_origExecute));
     MH_CreateHook(present,   &HookedPresent,   reinterpret_cast<void**>(&g_origPresent));
     MH_CreateHook(omSetRT,   &HookedOMSetRT,   reinterpret_cast<void**>(&g_origOMSetRT));
     MH_CreateHook(createRTV, &HookedCreateRTV, reinterpret_cast<void**>(&g_origCreateRTV));
     MH_EnableHook(MH_ALL_HOOKS);
-    puts("[acevo-obs] Hooks installes. Injecte depuis le MENU pour capter le retroviseur.");
+    puts("[acevo-obs] Hooks installed.");
     return 0;
 }
 
