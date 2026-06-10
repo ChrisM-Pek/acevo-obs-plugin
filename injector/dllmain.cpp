@@ -3,9 +3,11 @@
 // Deux captures vers OBS :
 //   - CleanView (source 1) : la scene principale tonemappee SANS HUD. On copie
 //     le swapchain juste apres le tonemap, avant le composite du HUD.
-//   - Camera1  (source 2) : le retroviseur (Colour Pass #7 -> mirror_texture0,
-//     1024x256, R11G11B10_FLOAT HDR). On copie sa RT, puis on tonemappe en
-//     RGBA8 via une petite passe D3D11 (sinon l'image serait sombre).
+//   - Camera1  (source 2) : le retroviseur (mirror_texture0, 1024x256,
+//     R11G11B10_FLOAT HDR, rempli par les Colour Pass #7 puis #8). On copie sa
+//     RT a chaque sortie d'etat RENDER_TARGET (la derniere copie de la frame,
+//     apres le pass #8, gagne), puis on tonemappe en RGBA8 via une petite passe
+//     D3D11 (sinon l'image serait sombre).
 //
 // Detection des RT via OMSetRenderTargets + map descripteur->ressource
 // (CreateRenderTargetView). Pour le swapchain on apprend le handle a Present.

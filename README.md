@@ -17,8 +17,10 @@ as independent video sources.
 Currently available feeds:
 
 - **Main view (no HUD)** — the tonemapped scene captured right before the HUD composite.
-- **Rear-view mirror** — the mirror render target (Colour Pass #7, HDR `R11G11B10`),
-  tonemapped to RGBA8 inside the DLL.
+- **Rear-view mirror** — the mirror render target (`mirror_texture0`, `1024x256`,
+  HDR `R11G11B10_FLOAT`), tonemapped to RGBA8 inside the DLL. The engine fills this
+  texture across Colour Pass #7 (base) and #8 (extra detail/LOD); we capture the final
+  version after the last render-target write.
 
 > ⚠️ Personal modding / reverse-engineering project. See [Warnings](#warnings).
 
@@ -154,8 +156,10 @@ Just delete `dxgi.dll` and `dxgi_orig.dll` from the game folder.
 - **Swapchain detection** — the backbuffer RTV handle is *learned* at `Present` time
   (the last bound RTV); the swapchain → other-RT switch then triggers the copy of the
   clean scene (post-tonemap, pre-HUD).
-- **Mirror detection** — `IsMirrorDesc` heuristic (2D `R11G11B10_FLOAT` texture,
-  `ALLOW_RENDER_TARGET`, wide and ≤ 2048 px). Adjust if the game changes format/dimensions.
+- **Mirror detection** — `IsMirrorDesc` heuristic targeting `mirror_texture0` (2D
+  `R11G11B10_FLOAT`, `ALLOW_RENDER_TARGET`, wide ~4:1 like `1024x256`). The copy is recorded
+  each time the mirror leaves the render-target state, so the last write of the frame
+  (Colour Pass #8) is the one captured. Adjust if the game changes format/dimensions.
 - **Mirror tonemap** — the mirror RT is linear HDR; a tiny D3D11 shader (`c/(c+1)` + gamma 2.2)
   converts it to RGBA8 for correct rendering in OBS.
 - **IPC protocol** — `kProtocolVersion` in `shared/ipc.h`. Bump it whenever the layout changes.
